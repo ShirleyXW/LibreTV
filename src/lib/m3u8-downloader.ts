@@ -1,5 +1,6 @@
 import { parseM3u8Playlist, type ParsedPlaylist } from './m3u8-parse';
 import { StreamingTransmuxer } from './mp4-transmuxer';
+import { PROXY_BASE, isProxiedUri } from './m3u8';
 
 /**
  * 整集离线下载：
@@ -145,16 +146,20 @@ export async function runDownloadJob(opts: DownloadJobOptions): Promise<void> {
     });
   };
 
-  // —— 解析（重试 2 次） ——
+  // —— 解析：先直连，失败后仅切到现有 /api/proxy；其余下载/解析逻辑保持原样 ——
   let parsed: ParsedPlaylist;
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const playlistCandidates = isProxiedUri(url)
+    ? [url]
+    : [url, `${PROXY_BASE}${encodeURIComponent(url)}`];
+  for (const candidate of playlistCandidates) {
     try {
-      parsed = await parseM3u8Playlist(url, 0, undefined, { stripLeadAd: true });
+      parsed = await parseM3u8Playlist(candidate, 0, undefined, { stripLeadAd: true });
       lastErr = undefined;
       break;
     } catch (err) {
       lastErr = err;
+      if (signal.aborted) throw err;
     }
   }
   if (lastErr || !parsed!) {
