@@ -31,6 +31,12 @@ export interface AesConf {
 }
 
 export interface ParsedPlaylist {
+  /** fMP4 初始化段（EXT-X-MAP）；存在时 media 分片通常为 .m4s，不应再送入 TS transmuxer */
+  initMap?: { url: string };
+  /** 播放列表中 EXT-X-MAP 切换过 URI；单文件下载暂不安全支持 */
+  initMapChanged: boolean;
+  /** 播放列表中 EXT-X-KEY 的有效配置发生过变化；当前单 key 解密模型不支持 */
+  aesConfigChanged: boolean;
   /** master 播放列表时非空（已按 preferredHeight 选档） */
   variants?: ParsedVariant[];
   segments: ParsedSegment[];
@@ -153,16 +159,33 @@ export async function parseM3u8Playlist(
 
   // —— media：分片 / 时长 / AES / BYTERANGE ——
   const segments: ParsedSegment[] = [];
-  let aesConf: AesConf | undefined;
+  let activeAesConf: AesConf | undefined;
+  let activeInitMap: { url: string } | undefined;
+  // stripAdGroups 会保留被删广告段中的 KEY/MAP 声明，因此不能仅按“声明是否变化”判断。
+  // 只记录真正作用到保留分片上的配置，避免把未使用的广告 KEY/MAP 误判成轮换。
+  const usedAesConfigs = new Map<string, AesConf | undefined>();
+  const usedInitMaps = new Set<string>();
   let byterange = false;
   let pendingDuration = 0;
   const mediaSequence = parseInt(text.match(/^#EXT-X-MEDIA-SEQUENCE:(\d+)/m)?.[1] || '0', 10) || 0;
   for (const raw of text.split('\n')) {
     const line = raw.trim();
+    if (line.startsWith('#EXT-X-MAP')) {
+      const uri = line.match(/URI="([^"]+)"/)?.[1];
+      if (uri) activeInitMap = { url: makeAbsolute(uri, base) };
+      continue;
+    }
     if (line.startsWith('#EXT-X-KEY')) {
-      // 取最后一次出现的 KEY（逐段换 key 的源不在支持范围）
-      const conf = parseAesConf(line);
-      if (conf) aesConf = { ...conf, uri: makeAbsolute(conf.uri, base) };
+      const method = line.match(/METHOD=([^,]+)/)?.[1];
+      if (!method) throw new Error('EXT-X-KEY 缺少 METHOD');
+
+      if (method === 'NONE') {
+        activeAesConf = undefined;
+      } else {
+        const conf = parseAesConf(line);
+        if (!conf) throw new Error(`EXT-X-KEY 配置无效：${method} 缺少 URI`);
+        activeAesConf = { ...conf, uri: makeAbsolute(conf.uri, base) };
+      }
       continue;
     }
     if (line.startsWith('#EXT-X-BYTERANGE')) {
@@ -175,12 +198,26 @@ export async function parseM3u8Playlist(
     }
     if (!line || line.startsWith('#')) continue;
     segments.push({ url: makeAbsolute(line, base), duration: pendingDuration });
+    const aesSignature = activeAesConf
+      ? `${activeAesConf.method}|${activeAesConf.uri}|${activeAesConf.iv ?? ''}`
+      : 'NONE';
+    usedAesConfigs.set(aesSignature, activeAesConf);
+    usedInitMaps.add(activeInitMap?.url ?? 'NONE');
     pendingDuration = 0;
   }
   if (!segments.length) throw new Error('m3u8 未解析到分片');
+  const aesConfigChanged = usedAesConfigs.size > 1;
+  const onlyAes = usedAesConfigs.size === 1 ? usedAesConfigs.values().next().value : undefined;
+  const aesConf = onlyAes as AesConf | undefined;
+  const initMapChanged = usedInitMaps.size > 1;
+  const onlyInitMap = usedInitMaps.size === 1 ? usedInitMaps.values().next().value : undefined;
+  const initMap = onlyInitMap && onlyInitMap !== 'NONE' ? { url: onlyInitMap } : undefined;
   return {
     segments,
+    initMap,
+    initMapChanged,
     aesConf,
+    aesConfigChanged,
     byterange,
     totalDuration: segments.reduce((sum, s) => sum + s.duration, 0),
     mediaSequence,

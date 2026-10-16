@@ -53,7 +53,7 @@ export interface SegmentMetaEntry {
   lastAccess: number;
 }
 
-export type DownloadStatus = 'waiting' | 'downloading' | 'paused' | 'completed' | 'error';
+export type DownloadStatus = 'waiting' | 'downloading' | 'processing' | 'paused' | 'completed' | 'error';
 
 export interface DownloadTaskEntry {
   id: string;
